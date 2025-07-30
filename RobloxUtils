@@ -1,0 +1,464 @@
+--[[
+	RobloxUtils - A comprehensive utility library for Roblox development
+	Author: Chris
+	Version: 1.0.0
+	
+	This library provides common utilities for:
+	- Math operations and calculations
+	- String manipulation
+	- Table operations
+	- Player utilities
+	- UI helpers
+	- Tween utilities
+	- Instance management
+	- Data validation
+--]]
+
+local RobloxUtils = {}
+
+-- Services
+local Players = game:GetService("Players")
+local TweenService = game:GetService("TweenService")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+RobloxUtils.Math = {}
+
+function RobloxUtils.Math.Round(number, decimals)
+	decimals = decimals or 0
+	local mult = 10^decimals
+	return math.floor(number * mult + 0.5) / mult
+end
+
+function RobloxUtils.Math.Clamp(value, min, max)
+	return math.max(min, math.min(max, value))
+end
+
+function RobloxUtils.Math.Lerp(a, b, t)
+	return a + (b - a) * t
+end
+
+function RobloxUtils.Math.Map(value, inMin, inMax, outMin, outMax)
+	return (value - inMin) * (outMax - outMin) / (inMax - inMin) + outMin
+end
+
+function RobloxUtils.Math.RandomFloat(min, max)
+	return min + math.random() * (max - min)
+end
+
+function RobloxUtils.Math.Distance2D(point1, point2)
+	local dx = point2.X - point1.X
+	local dy = point2.Y - point1.Y
+	return math.sqrt(dx * dx + dy * dy)
+end
+
+-- String Utilities
+RobloxUtils.String = {}
+
+function RobloxUtils.String.Split(str, delimiter)
+	local result = {}
+	local pattern = "([^" .. delimiter .. "]+)"
+	for match in str:gmatch(pattern) do
+		table.insert(result, match)
+	end
+	return result
+end
+
+function RobloxUtils.String.Trim(str)
+	return str:match("^%s*(.-)%s*$")
+end
+
+function RobloxUtils.String.StartsWith(str, prefix)
+	return str:sub(1, #prefix) == prefix
+end
+
+function RobloxUtils.String.EndsWith(str, suffix)
+	return str:sub(-#suffix) == suffix
+end
+
+function RobloxUtils.String.TitleCase(str)
+	return str:gsub("(%a)([%w_']*)", function(first, rest)
+		return first:upper() .. rest:lower()
+	end)
+end
+
+function RobloxUtils.String.FormatNumber(number)
+	local formatted = tostring(number)
+	local k, m, b = 1000, 1000000, 1000000000
+	
+	if number >= b then
+		return string.format("%.1fB", number / b)
+	elseif number >= m then
+		return string.format("%.1fM", number / m)
+	elseif number >= k then
+		return string.format("%.1fK", number / k)
+	end
+	
+	return formatted
+end
+
+RobloxUtils.Table = {}
+
+function RobloxUtils.Table.DeepCopy(original)
+	local copy = {}
+	for key, value in pairs(original) do
+		if type(value) == "table" then
+			copy[key] = RobloxUtils.Table.DeepCopy(value)
+		else
+			copy[key] = value
+		end
+	end
+	return copy
+end
+
+function RobloxUtils.Table.Merge(table1, table2)
+	local result = RobloxUtils.Table.DeepCopy(table1)
+	for key, value in pairs(table2) do
+		result[key] = value
+	end
+	return result
+end
+
+function RobloxUtils.Table.Find(tbl, predicate)
+	for i, value in ipairs(tbl) do
+		if predicate(value, i) then
+			return value, i
+		end
+	end
+	return nil
+end
+
+function RobloxUtils.Table.Filter(tbl, predicate)
+	local result = {}
+	for i, value in ipairs(tbl) do
+		if predicate(value, i) then
+			table.insert(result, value)
+		end
+	end
+	return result
+end
+
+function RobloxUtils.Table.Map(tbl, transformer)
+	local result = {}
+	for i, value in ipairs(tbl) do
+		result[i] = transformer(value, i)
+	end
+	return result
+end
+
+function RobloxUtils.Table.Shuffle(tbl)
+	local shuffled = RobloxUtils.Table.DeepCopy(tbl)
+	for i = #shuffled, 2, -1 do
+		local j = math.random(i)
+		shuffled[i], shuffled[j] = shuffled[j], shuffled[i]
+	end
+	return shuffled
+end
+
+RobloxUtils.Player = {}
+
+function RobloxUtils.Player.GetPlayerFromPart(part)
+	local character = part.Parent
+	if character then
+		return Players:GetPlayerFromCharacter(character)
+	end
+	return nil
+end
+
+function RobloxUtils.Player.GetPlayerDistance(player1, player2)
+	local char1 = player1.Character
+	local char2 = player2.Character
+	
+	if char1 and char2 and char1:FindFirstChild("HumanoidRootPart") and char2:FindFirstChild("HumanoidRootPart") then
+		return (char1.HumanoidRootPart.Position - char2.HumanoidRootPart.Position).Magnitude
+	end
+	
+	return math.huge
+end
+
+function RobloxUtils.Player.IsPlayerInGroup(player, groupId)
+	return player:IsInGroup(groupId)
+end
+
+function RobloxUtils.Player.GetPlayersInRadius(center, radius)
+	local playersInRadius = {}
+	
+	for _, player in pairs(Players:GetPlayers()) do
+		if player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
+			local distance = (player.Character.HumanoidRootPart.Position - center).Magnitude
+			if distance <= radius then
+				table.insert(playersInRadius, player)
+			end
+		end
+	end
+	
+	return playersInRadius
+end
+
+RobloxUtils.UI = {}
+
+function RobloxUtils.UI.CreateTween(object, info, properties)
+	local tweenInfo = TweenInfo.new(
+		info.Time or 1,
+		info.EasingStyle or Enum.EasingStyle.Quad,
+		info.EasingDirection or Enum.EasingDirection.Out,
+		info.RepeatCount or 0,
+		info.Reverses or false,
+		info.DelayTime or 0
+	)
+	
+	local tween = TweenService:Create(object, tweenInfo, properties)
+	return tween
+end
+
+function RobloxUtils.UI.FadeIn(guiObject, duration)
+	duration = duration or 0.5
+	local tween = RobloxUtils.UI.CreateTween(guiObject, {Time = duration}, {
+		BackgroundTransparency = 0,
+		TextTransparency = 0
+	})
+	tween:Play()
+	return tween
+end
+
+function RobloxUtils.UI.FadeOut(guiObject, duration)
+	duration = duration or 0.5
+	local tween = RobloxUtils.UI.CreateTween(guiObject, {Time = duration}, {
+		BackgroundTransparency = 1,
+		TextTransparency = 1
+	})
+	tween:Play()
+	return tween
+end
+
+function RobloxUtils.UI.ScaleUp(guiObject, scale, duration)
+	scale = scale or 1.2
+	duration = duration or 0.3
+	
+	local originalSize = guiObject.Size
+	local targetSize = UDim2.new(
+		originalSize.X.Scale * scale,
+		originalSize.X.Offset,
+		originalSize.Y.Scale * scale,
+		originalSize.Y.Offset
+	)
+	
+	local tween = RobloxUtils.UI.CreateTween(guiObject, {Time = duration}, {Size = targetSize})
+	tween:Play()
+	return tween
+end
+
+function RobloxUtils.UI.Shake(guiObject, intensity, duration)
+	intensity = intensity or 5
+	duration = duration or 0.5
+	
+	local originalPosition = guiObject.Position
+	local startTime = tick()
+	
+	local connection
+	connection = RunService.Heartbeat:Connect(function()
+		local elapsed = tick() - startTime
+		if elapsed >= duration then
+			guiObject.Position = originalPosition
+			connection:Disconnect()
+			return
+		end
+		
+		local offsetX = math.random(-intensity, intensity)
+		local offsetY = math.random(-intensity, intensity)
+		
+		guiObject.Position = UDim2.new(
+			originalPosition.X.Scale,
+			originalPosition.X.Offset + offsetX,
+			originalPosition.Y.Scale,
+			originalPosition.Y.Offset + offsetY
+		)
+	end)
+	
+	return connection
+end
+
+RobloxUtils.Instance = {}
+
+function RobloxUtils.Instance.WaitForChild(parent, childName, timeout)
+	timeout = timeout or 5
+	local startTime = tick()
+	
+	while not parent:FindFirstChild(childName) do
+		if tick() - startTime > timeout then
+			warn("WaitForChild timed out for: " .. childName)
+			return nil
+		end
+		wait(0.1)
+	end
+	
+	return parent:FindFirstChild(childName)
+end
+
+function RobloxUtils.Instance.DestroyChildren(parent, className)
+	for _, child in pairs(parent:GetChildren()) do
+		if not className or child.ClassName == className then
+			child:Destroy()
+		end
+	end
+end
+
+function RobloxUtils.Instance.CloneToAllPlayers(object, containerName)
+	containerName = containerName or "PlayerGui"
+	
+	for _, player in pairs(Players:GetPlayers()) do
+		if player:FindFirstChild(containerName) then
+			local clone = object:Clone()
+			clone.Parent = player[containerName]
+		end
+	end
+end
+
+function RobloxUtils.Instance.SafeDestroy(object)
+	if object and object.Parent then
+		object:Destroy()
+		return true
+	end
+	return false
+end
+
+RobloxUtils.Validate = {}
+
+function RobloxUtils.Validate.IsNumber(value)
+	return type(value) == "number" and value == value -- NaN check
+end
+
+function RobloxUtils.Validate.IsPositiveNumber(value)
+	return RobloxUtils.Validate.IsNumber(value) and value > 0
+end
+
+function RobloxUtils.Validate.IsString(value)
+	return type(value) == "string"
+end
+
+function RobloxUtils.Validate.IsNonEmptyString(value)
+	return RobloxUtils.Validate.IsString(value) and #value > 0
+end
+
+function RobloxUtils.Validate.IsTable(value)
+	return type(value) == "table"
+end
+
+function RobloxUtils.Validate.IsFunction(value)
+	return type(value) == "function"
+end
+
+function RobloxUtils.Validate.IsInstance(value, className)
+	if type(value) ~= "userdata" then
+		return false
+	end
+	
+	local success, result = pcall(function()
+		return value.ClassName == className
+	end)
+	
+	return success and result
+end
+
+RobloxUtils.Events = {}
+
+function RobloxUtils.Events.CreateEvent()
+	local event = {}
+	local connections = {}
+	
+	function event:Connect(callback)
+		local connection = {
+			Callback = callback,
+			Connected = true
+		}
+		
+		function connection:Disconnect()
+			self.Connected = false
+			for i, conn in ipairs(connections) do
+				if conn == self then
+					table.remove(connections, i)
+					break
+				end
+			end
+		end
+		
+		table.insert(connections, connection)
+		return connection
+	end
+	
+	function event:Fire(...)
+		for _, connection in ipairs(connections) do
+			if connection.Connected then
+				spawn(function()
+					connection.Callback(...)
+				end)
+			end
+		end
+	end
+	
+	function event:Destroy()
+		for _, connection in ipairs(connections) do
+			connection:Disconnect()
+		end
+	end
+	
+	return event
+end
+
+RobloxUtils.Cooldown = {}
+local cooldowns = {}
+
+function RobloxUtils.Cooldown.Set(key, duration)
+	cooldowns[key] = tick() + duration
+end
+
+function RobloxUtils.Cooldown.Check(key)
+	local endTime = cooldowns[key]
+	if not endTime then
+		return true
+	end
+	
+	if tick() >= endTime then
+		cooldowns[key] = nil
+		return true
+	end
+	
+	return false
+end
+
+function RobloxUtils.Cooldown.GetRemaining(key)
+	local endTime = cooldowns[key]
+	if not endTime then
+		return 0
+	end
+	
+	return math.max(0, endTime - tick())
+end
+
+RobloxUtils.Debug = {}
+
+function RobloxUtils.Debug.Log(message, level)
+	level = level or "INFO"
+	local timestamp = os.date("%H:%M:%S")
+	print(string.format("[%s] [%s] %s", timestamp, level, tostring(message)))
+end
+
+function RobloxUtils.Debug.Warn(message)
+	RobloxUtils.Debug.Log(message, "WARN")
+end
+
+function RobloxUtils.Debug.Error(message)
+	RobloxUtils.Debug.Log(message, "ERROR")
+end
+
+function RobloxUtils.Debug.Benchmark(name, func)
+	local startTime = tick()
+	local result = func()
+	local endTime = tick()
+	
+	RobloxUtils.Debug.Log(string.format("%s took %.4f seconds", name, endTime - startTime), "BENCHMARK")
+	return result
+end
+
+return RobloxUtils
