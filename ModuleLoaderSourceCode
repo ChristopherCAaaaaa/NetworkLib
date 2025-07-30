@@ -1,0 +1,304 @@
+-- ModuleLoader - Chris
+
+local ModuleLoader = {}
+ModuleLoader.__index = ModuleLoader
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local ServerScriptService = game:GetService("ServerScriptService")
+local StarterPlayerScripts = game:GetService("StarterPlayer").StarterPlayerScripts
+local StarterGui = game:GetService("StarterGui")
+local RunService = game:GetService("RunService")
+
+local CONFIG = {
+	ModulesFolder = "Modules",
+	SharedFolder = "Shared",
+	ServerFolder = "Server", 
+	ClientFolder = "Client",
+	GuiFolder = "Gui",
+	RemoteEventsFolder = "RemoteEvents",
+	RemoteFunctionsFolder = "RemoteFunctions"
+}
+
+local function createFolderStructure()
+	local folders = {}
+
+	if not ReplicatedStorage:FindFirstChild(CONFIG.ModulesFolder) then
+		folders.Modules = Instance.new("Folder")
+		folders.Modules.Name = CONFIG.ModulesFolder
+		folders.Modules.Parent = ReplicatedStorage
+	else
+		folders.Modules = ReplicatedStorage[CONFIG.ModulesFolder]
+	end
+
+	for _, folderName in pairs({CONFIG.SharedFolder, CONFIG.ClientFolder, CONFIG.GuiFolder}) do
+		if not folders.Modules:FindFirstChild(folderName) then
+			local folder = Instance.new("Folder")
+			folder.Name = folderName
+			folder.Parent = folders.Modules
+		end
+	end
+
+	if not ReplicatedStorage:FindFirstChild(CONFIG.RemoteEventsFolder) then
+		local remoteEvents = Instance.new("Folder")
+		remoteEvents.Name = CONFIG.RemoteEventsFolder
+		remoteEvents.Parent = ReplicatedStorage
+	end
+
+	if not ReplicatedStorage:FindFirstChild(CONFIG.RemoteFunctionsFolder) then
+		local remoteFunctions = Instance.new("Folder")
+		remoteFunctions.Name = CONFIG.RemoteFunctionsFolder
+		remoteFunctions.Parent = ReplicatedStorage
+	end
+
+	return folders
+end
+
+local moduleRegistry = {
+	server = {},
+	client = {},
+	shared = {},
+	gui = {}
+}
+
+local loadedModules = {}
+
+local remoteEvents = {}
+local remoteFunctions = {}
+
+function ModuleLoader.new()
+	local self = setmetatable({}, ModuleLoader)
+	self.folders = createFolderStructure()
+	self:setupRemotes()
+	return self
+end
+
+function ModuleLoader:setupRemotes()
+	
+	local moduleRequestRemote = Instance.new("RemoteFunction")
+	moduleRequestRemote.Name = "ModuleRequest"
+	moduleRequestRemote.Parent = ReplicatedStorage[CONFIG.RemoteFunctionsFolder]
+
+	moduleRequestRemote.OnServerInvoke = function(player, moduleType, moduleName)
+		return self:getModuleForClient(moduleType, moduleName)
+	end
+
+	local guiLoadRemote = Instance.new("RemoteEvent")
+	guiLoadRemote.Name = "LoadGui"
+	guiLoadRemote.Parent = ReplicatedStorage[CONFIG.RemoteEventsFolder]
+
+	self.moduleRequestRemote = moduleRequestRemote
+	self.guiLoadRemote = guiLoadRemote
+end
+
+function ModuleLoader:registerModule(moduleType, moduleName, moduleScript)
+	if not moduleRegistry[moduleType] then
+		warn("Invalid module type: " .. tostring(moduleType))
+		return false
+	end
+
+	moduleRegistry[moduleType][moduleName] = moduleScript
+	print("Registered " .. moduleType .. " module: " .. moduleName)
+	return true
+end
+
+function ModuleLoader:loadModule(moduleType, moduleName)
+	local cacheKey = moduleType .. ":" .. moduleName
+
+	if loadedModules[cacheKey] then
+		return loadedModules[cacheKey]
+	end
+
+	local moduleScript = moduleRegistry[moduleType] and moduleRegistry[moduleType][moduleName]
+	if not moduleScript then
+		warn("Module not found: " .. moduleType .. "." .. moduleName)
+		return nil
+	end
+
+	local success, result = pcall(require, moduleScript)
+	if success then
+		loadedModules[cacheKey] = result
+		print("Loaded " .. moduleType .. " module: " .. moduleName)
+		return result
+	else
+		warn("Failed to load module " .. moduleName .. ": " .. tostring(result))
+		return nil
+	end
+end
+
+function ModuleLoader:getModuleForClient(moduleType, moduleName)
+	if moduleType == "server" then
+		warn("Cannot send server module to client: " .. moduleName)
+		return nil
+	end
+
+	local moduleScript = moduleRegistry[moduleType] and moduleRegistry[moduleType][moduleName]
+	if not moduleScript then
+		warn("Module not found for client: " .. moduleType .. "." .. moduleName)
+		return nil
+	end
+
+	local targetFolder = self.folders.Modules:FindFirstChild(moduleType == "shared" and CONFIG.SharedFolder or 
+		moduleType == "gui" and CONFIG.GuiFolder or CONFIG.ClientFolder)
+
+	if not targetFolder then
+		warn("Target folder not found for module type: " .. moduleType)
+		return nil
+	end
+
+	local existingModule = targetFolder:FindFirstChild(moduleName)
+	if existingModule then
+		return existingModule
+	end
+
+	local clonedModule = moduleScript:Clone()
+	clonedModule.Name = moduleName
+	clonedModule.Parent = targetFolder
+
+	return clonedModule
+end
+
+function ModuleLoader:autoRegisterModules(folder, moduleType)
+	for _, child in pairs(folder:GetChildren()) do
+		if child:IsA("ModuleScript") then
+			self:registerModule(moduleType, child.Name, child)
+		elseif child:IsA("Folder") then
+			self:autoRegisterModules(child, moduleType)
+		end
+	end
+end
+
+function ModuleLoader:loadGuiForPlayer(player, guiName)
+	local guiModule = self:getModuleForClient("gui", guiName)
+	if guiModule then
+		self.guiLoadRemote:FireClient(player, guiName)
+		print("Loaded GUI '" .. guiName .. "' for player: " .. player.Name)
+	else
+		warn("Failed to load GUI '" .. guiName .. "' for player: " .. player.Name)
+	end
+end
+
+function ModuleLoader:loadGuiForAllPlayers(guiName)
+	for _, player in pairs(Players:GetPlayers()) do
+		self:loadGuiForPlayer(player, guiName)
+	end
+end
+
+function ModuleLoader:initializeServerModules()
+	for moduleName, moduleScript in pairs(moduleRegistry.server) do
+		local module = self:loadModule("server", moduleName)
+		if module and typeof(module.Initialize) == "function" then
+			spawn(function()
+				module:Initialize(self)
+			end)
+		end
+	end
+end
+
+function ModuleLoader:setupClientLoader()
+	local clientLoaderScript = Instance.new("LocalScript")
+	clientLoaderScript.Name = "ModuleLoader_Client"
+
+	local clientCode = [[
+        -- Client Module Loader
+        local ReplicatedStorage = game:GetService("ReplicatedStorage")
+        local Players = game:GetService("Players")
+        local StarterGui = game:GetService("StarterGui")
+        
+        local player = Players.LocalPlayer
+        local playerGui = player:WaitForChild("PlayerGui")
+        
+        -- Wait for remotes
+        local moduleRequestRemote = ReplicatedStorage:WaitForChild("RemoteFunctions"):WaitForChild("ModuleRequest")
+        local guiLoadRemote = ReplicatedStorage:WaitForChild("RemoteEvents"):WaitForChild("LoadGui")
+        
+        -- Client module cache
+        local clientModules = {}
+        
+        -- Load a module on client
+        local function loadClientModule(moduleType, moduleName)
+            local cacheKey = moduleType .. ":" .. moduleName
+            if clientModules[cacheKey] then
+                return clientModules[cacheKey]
+            end
+            
+            local moduleScript = moduleRequestRemote:InvokeServer(moduleType, moduleName)
+            if moduleScript then
+                local success, result = pcall(require, moduleScript)
+                if success then
+                    clientModules[cacheKey] = result
+                    print("Client loaded module: " .. moduleName)
+                    return result
+                else
+                    warn("Failed to load client module " .. moduleName .. ": " .. tostring(result))
+                end
+            end
+            return nil
+        end
+        
+        -- Handle GUI loading
+        guiLoadRemote.OnClientEvent:Connect(function(guiName)
+            local guiModule = loadClientModule("gui", guiName)
+            if guiModule and typeof(guiModule.CreateGui) == "function" then
+                local gui = guiModule:CreateGui(player)
+                if gui then
+                    gui.Parent = playerGui
+                end
+            end
+        end)
+        
+        -- Global function to load modules from client scripts
+        _G.LoadModule = loadClientModule
+        
+        -- Load shared modules that should auto-initialize on client
+        spawn(function()
+            wait(1) -- Small delay to ensure everything is loaded
+            local sharedFolder = ReplicatedStorage:WaitForChild("Modules"):WaitForChild("Shared")
+            for _, moduleScript in pairs(sharedFolder:GetChildren()) do
+                if moduleScript:IsA("ModuleScript") then
+                    local module = loadClientModule("shared", moduleScript.Name)
+                    if module and typeof(module.InitializeClient) == "function" then
+                        spawn(function()
+                            module:InitializeClient()
+                        end)
+                    end
+                end
+            end
+        end)
+    ]]
+
+	clientLoaderScript.Source = clientCode
+	clientLoaderScript.Parent = StarterPlayerScripts
+
+	print("Client loader script created")
+end
+
+function ModuleLoader:initialize()
+	local serverModulesFolder = ServerScriptService:FindFirstChild(CONFIG.ServerFolder)
+	if serverModulesFolder then
+		self:autoRegisterModules(serverModulesFolder, "server")
+	end
+
+	local sharedModulesFolder = ServerScriptService:FindFirstChild(CONFIG.SharedFolder)
+	if sharedModulesFolder then
+		self:autoRegisterModules(sharedModulesFolder, "shared")
+	end
+
+	local clientModulesFolder = ServerScriptService:FindFirstChild(CONFIG.ClientFolder)
+	if clientModulesFolder then
+		self:autoRegisterModules(clientModulesFolder, "client")
+	end
+
+	local guiModulesFolder = ServerScriptService:FindFirstChild(CONFIG.GuiFolder)
+	if guiModulesFolder then
+		self:autoRegisterModules(guiModulesFolder, "gui")
+	end
+
+	self:setupClientLoader()
+
+	self:initializeServerModules()
+
+	print("ModuleLoader initialized successfully!")
+end
+
+return ModuleLoader
