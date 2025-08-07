@@ -1,1 +1,587 @@
+--[[
+	NetworkLib - Chris
+]]
 
+local startupStartTime = tick()
+
+local NetworkLib = {}
+NetworkLib.__index = NetworkLib
+
+local Players, ReplicatedStorage, RunService, HttpService
+local IS_SERVER, IS_CLIENT
+
+local RATE_LIMIT_CLEANUP = 30
+local DEFAULT_TIMEOUT = 30
+local DEFAULT_RETRIES = 3
+local CACHE_CLEANUP_INTERVAL = 60
+local MAX_CACHE_SIZE = 1000
+
+local rateLimitData = {}
+local responseCache = {}
+local cacheKeys = {}
+local cacheOrder = {}
+local eventHandlers = {}
+local functionHandlers = {}
+local remoteCache = {}
+local performanceStats = {
+	totalRequests = 0,
+	failedRequests = 0,
+	avgResponseTime = 0,
+	cacheHits = 0,
+	rateLimitHits = 0
+}
+
+local startupEndTime = tick()
+local startupTime = (startupEndTime - startupStartTime) * 1000
+
+task.defer(function() end)
+
+local function initServices()
+	if not Players then
+		Players = game:GetService("Players")
+		ReplicatedStorage = game:GetService("ReplicatedStorage")
+		RunService = game:GetService("RunService")
+		HttpService = game:GetService("HttpService")
+		IS_SERVER = RunService:IsServer()
+		IS_CLIENT = RunService:IsClient()
+	end
+end
+
+local RemotesFolder
+local function getRemotesFolder()
+	if not RemotesFolder then
+		initServices()
+		RemotesFolder = ReplicatedStorage:FindFirstChild("NetworkLibRemotes")
+		if not RemotesFolder then
+			RemotesFolder = Instance.new("Folder")
+			RemotesFolder.Name = "NetworkLibRemotes"
+			RemotesFolder.Parent = ReplicatedStorage
+		end
+	end
+	return RemotesFolder
+end
+
+local lastTick = 0
+local tickTime = 0
+local function getCurrentTime()
+	local currentTick = tick()
+	if currentTick ~= lastTick then
+		lastTick = currentTick
+		tickTime = currentTick
+	end
+	return tickTime
+end
+
+local function shallowCopy(t)
+	if type(t) ~= "table" then return t end
+	local copy = {}
+	for k, v in pairs(t) do
+		copy[k] = v
+	end
+	return copy
+end
+
+local function isRateLimited(player, eventName, limit, window)
+	initServices()
+	if not IS_SERVER then return false end
+
+	local playerId = typeof(player) == "Instance" and player.UserId or player
+	local key = playerId .. ":" .. eventName
+	local now = getCurrentTime()
+
+	local requests = rateLimitData[key]
+	if not requests then
+		rateLimitData[key] = {now}
+		return false
+	end
+
+	local len = #requests
+	local cleanIndex = math.max(1, len - 4)
+	for i = len, cleanIndex, -1 do
+		if now - requests[i] <= window then
+			break
+		end
+		requests[i] = nil
+		len = len - 1
+	end
+
+	if len >= limit then
+		performanceStats.rateLimitHits = performanceStats.rateLimitHits + 1
+		return true
+	end
+
+	requests[len + 1] = now
+	return false
+end
+
+local function getCacheKey(eventName, data)
+	if not data then return eventName .. ":nil" end
+
+	local dataType = type(data)
+	if dataType == "string" then
+		return eventName .. ":" .. data
+	elseif dataType == "number" then
+		return eventName .. ":" .. tostring(data)
+	elseif dataType == "boolean" then
+		return eventName .. ":" .. (data and "true" or "false")
+	end
+
+	if dataType == "table" then
+		initServices()
+		local success, encoded = pcall(HttpService.JSONEncode, HttpService, data)
+		if success then
+			return eventName .. ":" .. encoded
+		end
+	end
+
+	return eventName .. ":" .. tostring(data)
+end
+
+local function getFromCache(key, maxAge)
+	local cached = responseCache[key]
+	if not cached then return nil end
+
+	if (getCurrentTime() - cached.timestamp) >= maxAge then
+		responseCache[key] = nil
+		cacheKeys[key] = nil
+		return nil
+	end
+
+	performanceStats.cacheHits = performanceStats.cacheHits + 1
+	return shallowCopy(cached.data)
+end
+
+local function setCache(key, data, ttl)
+	responseCache[key] = {
+		data = shallowCopy(data),
+		timestamp = getCurrentTime(),
+		ttl = ttl or 300
+	}
+
+	local order = cacheOrder
+	order[#order + 1] = key
+	cacheKeys[key] = #order
+
+	if #order > MAX_CACHE_SIZE then
+		local oldKey = order[1]
+		table.remove(order, 1)
+		responseCache[oldKey] = nil
+		cacheKeys[oldKey] = nil
+		for i = 1, #order do
+			cacheKeys[order[i]] = i
+		end
+	end
+end
+
+local function Promise(executor)
+	local promise = {
+		state = "pending",
+		value = nil,
+		handlers = {}
+	}
+
+	local function resolve(value)
+		if promise.state ~= "pending" then return end
+		promise.state = "resolved"
+		promise.value = value
+
+		local handlers = promise.handlers
+		if #handlers > 0 then
+			for i = 1, #handlers do
+				local handler = handlers[i]
+				if handler.onResolve then
+					task.spawn(handler.onResolve, value)
+				end
+			end
+			promise.handlers = {}
+		end
+	end
+
+	local function reject(reason)
+		if promise.state ~= "pending" then return end
+		promise.state = "rejected"
+		promise.value = reason
+
+		local handlers = promise.handlers
+		if #handlers > 0 then
+			for i = 1, #handlers do
+				local handler = handlers[i]
+				if handler.onReject then
+					task.spawn(handler.onReject, reason)
+				end
+			end
+			promise.handlers = {}
+		end
+	end
+
+	function promise:andThen(onResolve, onReject)
+		if self.state == "resolved" then
+			if onResolve then task.spawn(onResolve, self.value) end
+		elseif self.state == "rejected" then
+			if onReject then task.spawn(onReject, self.value) end
+		else
+			self.handlers[#self.handlers + 1] = {onResolve = onResolve, onReject = onReject}
+		end
+		return self
+	end
+
+	function promise:catch(onReject)
+		return self:andThen(nil, onReject)
+	end
+
+	local success, result = pcall(executor, resolve, reject)
+	if not success then reject(result) end
+
+	return promise
+end
+
+local function getRemoteEvent(name)
+	local cached = remoteCache[name]
+	if cached then return cached end
+
+	local folder = getRemotesFolder()
+	local remote = folder:FindFirstChild(name)
+
+	if not remote then
+		initServices()
+		if IS_SERVER then
+			remote = Instance.new("RemoteEvent")
+			remote.Name = name
+			remote.Parent = folder
+		else
+			remote = folder:WaitForChild(name, 10)
+		end
+	end
+
+	if remote then remoteCache[name] = remote end
+	return remote
+end
+
+local function getRemoteFunction(name)
+	local funcName = name .. "_Function"
+	local cached = remoteCache[funcName]
+	if cached then return cached end
+
+	local folder = getRemotesFolder()
+	local remote = folder:FindFirstChild(funcName)
+
+	if not remote then
+		initServices()
+		if IS_SERVER then
+			remote = Instance.new("RemoteFunction")
+			remote.Name = funcName
+			remote.Parent = folder
+		else
+			remote = folder:WaitForChild(funcName, 10)
+		end
+	end
+
+	if remote then remoteCache[funcName] = remote end
+	return remote
+end
+
+function NetworkLib:FireServer(eventName, data, options)
+	initServices()
+	if not IS_CLIENT then error("FireServer can only be called from client") end
+
+	local remote = getRemoteEvent(eventName)
+	if remote then
+		remote:FireServer(data)
+	end
+end
+
+function NetworkLib:FireClient(player, eventName, data, options)
+	initServices()
+	if not IS_SERVER then error("FireClient can only be called from server") end
+
+	options = options or {}
+	local rateLimit = options.rateLimit or {limit = 60, window = 60}
+
+	if isRateLimited(player, eventName, rateLimit.limit, rateLimit.window) then
+		return false
+	end
+
+	local remote = getRemoteEvent(eventName)
+	if remote then
+		remote:FireClient(player, data)
+		return true
+	end
+	return false
+end
+
+function NetworkLib:FireAllClients(eventName, data, options)
+	initServices()
+	if not IS_SERVER then error("FireAllClients can only be called from server") end
+
+	local remote = getRemoteEvent(eventName)
+	if remote then
+		remote:FireAllClients(data)
+		return true
+	end
+	return false
+end
+
+local cleanupInitialized = false
+local function initCleanup()
+	if cleanupInitialized then return end
+	cleanupInitialized = true
+
+	initServices()
+
+	local function cleanupRateLimits()
+		local now = getCurrentTime()
+		local toRemove = {}
+
+		for key, requests in pairs(rateLimitData) do
+			local newRequests = {}
+			for i = 1, #requests do
+				if now - requests[i] <= 300 then
+					newRequests[#newRequests + 1] = requests[i]
+				end
+			end
+
+			if #newRequests == 0 then
+				toRemove[#toRemove + 1] = key
+			else
+				rateLimitData[key] = newRequests
+			end
+		end
+
+		for i = 1, #toRemove do
+			rateLimitData[toRemove[i]] = nil
+		end
+	end
+
+	local function cleanupCache()
+		local now = getCurrentTime()
+		local toRemove = {}
+
+		for key, cached in pairs(responseCache) do
+			if now - cached.timestamp > cached.ttl then
+				toRemove[#toRemove + 1] = key
+			end
+		end
+
+		for i = 1, #toRemove do
+			local key = toRemove[i]
+			responseCache[key] = nil
+			local pos = cacheKeys[key]
+			if pos then
+				table.remove(cacheOrder, pos)
+				cacheKeys[key] = nil
+				for j = pos, #cacheOrder do
+					cacheKeys[cacheOrder[j]] = j
+				end
+			end
+		end
+	end
+
+	if IS_SERVER then
+		task.spawn(function()
+			while true do
+				task.wait(RATE_LIMIT_CLEANUP)
+				cleanupRateLimits()
+			end
+		end)
+	end
+
+	task.spawn(function()
+		while true do
+			task.wait(CACHE_CLEANUP_INTERVAL)
+			cleanupCache()
+		end
+	end)
+end
+
+local function ensureCleanupInit()
+	if not cleanupInitialized then
+		initCleanup()
+	end
+end
+
+function NetworkLib:InvokeServer(eventName, data, options)
+	initServices()
+	ensureCleanupInit()
+	if not IS_CLIENT then error("InvokeServer can only be called from client") end
+
+	options = options or {}
+	local timeout = options.timeout or DEFAULT_TIMEOUT
+	local retries = options.retries or DEFAULT_RETRIES
+	local cache = options.cache
+
+	local cacheKey, cached
+	if cache then
+		cacheKey = getCacheKey(eventName, data)
+		cached = getFromCache(cacheKey, cache.maxAge or 300)
+		if cached then
+			return Promise(function(resolve)
+				task.defer(resolve, cached)
+			end)
+		end
+	end
+
+	return Promise(function(resolve, reject)
+		local startTime = getCurrentTime()
+		local timeoutHandle
+		local resolved = false
+
+		performanceStats.totalRequests = performanceStats.totalRequests + 1
+
+		local function cleanup()
+			if timeoutHandle then task.cancel(timeoutHandle) end
+		end
+
+		local function attempt(attemptsLeft)
+			local remote = getRemoteFunction(eventName)
+			if not remote then
+				cleanup()
+				if not resolved then
+					resolved = true
+					performanceStats.failedRequests = performanceStats.failedRequests + 1
+					reject("Remote function not found: " .. eventName)
+				end
+				return
+			end
+
+			task.spawn(function()
+				local success, result = pcall(remote.InvokeServer, remote, data)
+
+				if resolved then return end
+
+				local responseTime = getCurrentTime() - startTime
+				local totalRequests = performanceStats.totalRequests
+				performanceStats.avgResponseTime = ((performanceStats.avgResponseTime * (totalRequests - 1)) + responseTime) / totalRequests
+
+				if success then
+					resolved = true
+					cleanup()
+					if cache and cacheKey then
+						setCache(cacheKey, result, cache.ttl)
+					end
+					resolve(result)
+				else
+					performanceStats.failedRequests = performanceStats.failedRequests + 1
+					if attemptsLeft > 0 then
+						local delay = math.min(math.pow(2, retries - attemptsLeft), 5)
+						task.wait(delay)
+						attempt(attemptsLeft - 1)
+					else
+						resolved = true
+						cleanup()
+						reject(result or "Request failed")
+					end
+				end
+			end)
+		end
+
+		timeoutHandle = task.delay(timeout, function()
+			if not resolved then
+				resolved = true
+				cleanup()
+				performanceStats.failedRequests = performanceStats.failedRequests + 1
+				reject("Request timed out")
+			end
+		end)
+
+		attempt(retries)
+	end)
+end
+
+function NetworkLib:OnServerEvent(eventName, handler, options)
+	initServices()
+	if not IS_SERVER then error("OnServerEvent can only be called from server") end
+
+	options = options or {}
+	local rateLimit = options.rateLimit or {limit = 60, window = 60}
+	local validation = options.validation
+
+	local remote = getRemoteEvent(eventName)
+	if not remote then return end
+
+	eventHandlers[eventName] = {handler = handler, options = options}
+
+	remote.OnServerEvent:Connect(function(player, data)
+		if isRateLimited(player, eventName, rateLimit.limit, rateLimit.window) then return end
+		if validation and not validation(player, data) then return end
+
+		task.spawn(function()
+			local success, result = pcall(handler, player, data)
+			if not success then end
+		end)
+	end)
+end
+
+function NetworkLib:OnClientEvent(eventName, handler, options)
+	initServices()
+	if not IS_CLIENT then error("OnClientEvent can only be called from client") end
+
+	local remote = getRemoteEvent(eventName)
+	if not remote then return end
+
+	eventHandlers[eventName] = {handler = handler, options = options or {}}
+
+	remote.OnClientEvent:Connect(function(data)
+		task.spawn(function()
+			local success, result = pcall(handler, data)
+			if not success then end
+		end)
+	end)
+end
+
+function NetworkLib:HandleFunction(eventName, handler, options)
+	initServices()
+	if not IS_SERVER then error("HandleFunction can only be called from server") end
+
+	options = options or {}
+	local rateLimit = options.rateLimit or {limit = 30, window = 60}
+	local validation = options.validation
+
+	local remote = getRemoteFunction(eventName)
+	if not remote then return end
+
+	functionHandlers[eventName] = {handler = handler, options = options}
+
+	remote.OnServerInvoke = function(player, data)
+		if isRateLimited(player, eventName, rateLimit.limit, rateLimit.window) then
+			return {success = false, error = "Rate limit exceeded"}
+		end
+
+		if validation and not validation(player, data) then
+			return {success = false, error = "Validation failed"}
+		end
+
+		local success, result = pcall(handler, player, data)
+		if success then
+			return result
+		else
+			return {success = false, error = "Internal server error"}
+		end
+	end
+end
+
+function NetworkLib:GetStats()
+	local stats = shallowCopy(performanceStats)
+	stats.cacheSize = #cacheOrder
+	stats.rateLimitEntries = 0
+	for _ in pairs(rateLimitData) do
+		stats.rateLimitEntries = stats.rateLimitEntries + 1
+	end
+
+	initServices()
+	stats.context = IS_SERVER and "server" or "client"
+	stats.startupTime = startupTime
+
+	return stats
+end
+
+function NetworkLib:GetStartupTime()
+	return startupTime
+end
+
+function NetworkLib:ClearCache()
+	responseCache = {}
+	cacheKeys = {}
+	cacheOrder = {}
+end
+
+return NetworkLib
