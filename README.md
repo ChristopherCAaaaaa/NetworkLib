@@ -5,19 +5,19 @@ A high-performance, feature-rich networking library for Roblox that simplifies c
 
 ## Features
 
-### 🚀 Core Functionality
+### Core Functionality
 - **Promise-based API** - Modern async/await-style programming
 - **Automatic Remote Management** - Creates and manages RemoteEvents/RemoteFunctions automatically
 - **Client & Server Support** - Works seamlessly on both sides
 
-### ⚡ Performance & Reliability
+### Performance & Reliability
 - **Built-in Caching** - Configurable response caching with TTL support
 - **Rate Limiting** - Prevents spam and abuse with per-player limits
 - **Automatic Retries** - Configurable retry logic with exponential backoff
 - **Timeout Protection** - Prevents hanging requests
 - **Performance Metrics** - Track success rates, response times, and cache hits
 
-### 🛡️ Security & Validation
+### Security & Validation
 - **Request Validation** - Custom validation functions for incoming data
 - **Rate Limit Protection** - Server-side protection against request flooding
 - **Error Handling** - Comprehensive error management and recovery
